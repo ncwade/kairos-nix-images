@@ -1,0 +1,17 @@
+#cloud-config
+
+# This config is intentionally small: the custom software and service live in
+# the immutable OCI image. Cloud config should contain per-instance settings.
+hostname: kairos-nix-poc
+
+users:
+  - name: kairos
+    groups:
+      - admin
+    ssh_authorized_keys:
+      - REPLACE_WITH_YOUR_PUBLIC_KEY
+
+install:
+  auto: true
+  device: /dev/vda
+  reboot: true
