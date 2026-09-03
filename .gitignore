@@ -1,4 +1,5 @@
 /result
 /result-*
 /output/
+/.kairos-build.*
 /.amp/portals/*

@@ -67,12 +67,22 @@ machine.
 [`cloud-config.yaml`](cloud-config.yaml) is only a template and its SSH key
 placeholder must be replaced.
 
-## Test the VM on macOS
+## Build and test the VM on macOS
 
-Generate the raw disk from either architecture's OCI archive on a Linux host as
-above, then copy the `.raw` file from `./output` to the Mac. Raw disk generation
-cannot run directly on macOS because AuroraBoot depends on Linux loop devices
-and filesystem mounts.
+AuroraBoot depends on Linux loop devices and filesystem mounts. The macOS app
+therefore creates a dedicated Colima Linux VM named `kairos-nix`, builds the
+ARM64 OCI archive with Nix inside it, and runs AuroraBoot there. Both Colima and
+the Docker client are supplied by the flake:
+
+```console
+nix run .#build-vm-macos -- ./output ./cloud-config.yaml
+```
+
+The initial run downloads the Colima VM, Nix builder image, Kairos base, and
+AuroraBoot, so it takes substantially longer than later runs. The cloud-config
+argument is optional. The dedicated VM remains running to cache its Nix and
+container stores; stop it with `nix shell nixpkgs#colima -c colima stop
+--profile kairos-nix`.
 
 With [Nix installed](https://nixos.org/download/), boot the disk using the
 flake-provided QEMU app:
@@ -85,8 +95,6 @@ On Apple Silicon, use the ARM64 image and native launcher for hardware
 acceleration:
 
 ```console
-# On Linux, build .#ociArchiveArm64 and run .#build-vm against the result.
-# Copy the resulting raw disk to the Mac, then:
 nix run .#test-vm-arm64 -- /path/to/kairos-arm64.raw
 ```
 

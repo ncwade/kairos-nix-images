@@ -7,12 +7,15 @@
     { nixpkgs, ... }:
     let
       system = "x86_64-linux";
+      armSystem = "aarch64-linux";
       supportedSystems = [
         system
+        armSystem
         "x86_64-darwin"
         "aarch64-darwin"
       ];
       pkgs = import nixpkgs { inherit system; };
+      armPkgs = import nixpkgs { system = armSystem; };
       mkKairosImage = import ./lib/mk-kairos-image.nix { inherit pkgs; };
       mkVm =
         imagePkgs: architecture:
@@ -23,12 +26,13 @@
         };
       vm = mkVm pkgs "amd64";
       arm64Vm = mkVm pkgs.pkgsCross.aarch64-multiplatform "arm64";
+      nativeArm64Vm = mkVm armPkgs "arm64";
 
       mkOciArchive =
-        image:
-        pkgs.runCommand "${image.name}-${image.tag}.oci.tar"
+        builderPkgs: image:
+        builderPkgs.runCommand "${image.name}-${image.tag}.oci.tar"
           {
-            nativeBuildInputs = [ pkgs.skopeo ];
+            nativeBuildInputs = [ builderPkgs.skopeo ];
           }
           ''
             export TMPDIR=$PWD/tmp
@@ -37,14 +41,15 @@
               docker-archive:${image.dockerArchive} \
               oci-archive:$out:${image.tag}
           '';
-      ociArchive = mkOciArchive vm;
-      arm64OciArchive = mkOciArchive arm64Vm;
+      ociArchive = mkOciArchive pkgs vm;
+      arm64OciArchive = mkOciArchive pkgs arm64Vm;
+      nativeArm64OciArchive = mkOciArchive armPkgs nativeArm64Vm;
 
       mkVerifyImage =
-        image: archive:
-        pkgs.runCommand "verify-${image.name}-${image.tag}"
+        builderPkgs: image: archive:
+        builderPkgs.runCommand "verify-${image.name}-${image.tag}"
           {
-            nativeBuildInputs = [ pkgs.jq ];
+            nativeBuildInputs = [ builderPkgs.jq ];
           }
           ''
             mkdir archive
@@ -81,8 +86,9 @@
 
             touch $out
           '';
-      verifyImage = mkVerifyImage vm ociArchive;
-      verifyArm64Image = mkVerifyImage arm64Vm arm64OciArchive;
+      verifyImage = mkVerifyImage pkgs vm ociArchive;
+      verifyArm64Image = mkVerifyImage pkgs arm64Vm arm64OciArchive;
+      verifyNativeArm64Image = mkVerifyImage armPkgs nativeArm64Vm nativeArm64OciArchive;
 
       buildVm = pkgs.writeShellApplication {
         name = "build-kairos-vm";
@@ -141,6 +147,97 @@
             "''${arguments[@]}"
         '';
       };
+
+      mkBuildVmMacos =
+        hostPkgs:
+        hostPkgs.writeShellApplication {
+          name = "build-kairos-vm-macos";
+          runtimeInputs = [
+            hostPkgs.colima
+            hostPkgs.coreutils
+            hostPkgs.docker-client
+            hostPkgs.skopeo
+          ];
+          text = ''
+            if [[ $# -gt 2 ]]; then
+              echo "usage: build-kairos-vm-macos [OUTPUT-DIRECTORY] [CLOUD-CONFIG]" >&2
+              exit 2
+            fi
+
+            if [[ ! -f flake.nix ]]; then
+              echo "run this command from the kairos-nix-images checkout" >&2
+              exit 1
+            fi
+
+            output=$(realpath -m "''${1:-./output}")
+            mkdir -p "$output"
+
+            work=$(mktemp -d "$PWD/.kairos-build.XXXXXX")
+            trap 'rm -rf "$work"' EXIT
+            mkdir "$work/output"
+
+            profile=kairos-nix
+            context=colima-kairos-nix
+            if ! colima status --profile "$profile" >/dev/null 2>&1; then
+              case "$(uname -m)" in
+                arm64) colima_arch=aarch64 ;;
+                x86_64) colima_arch=x86_64 ;;
+                *) echo "unsupported Mac architecture: $(uname -m)" >&2; exit 1 ;;
+              esac
+              colima start --profile "$profile" \
+                --activate=false \
+                --arch "$colima_arch" \
+                --runtime docker \
+                --vm-type vz \
+                --mount-type virtiofs \
+                --cpus 4 \
+                --memory 8 \
+                --disk 60
+            fi
+
+            nix_image=docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894
+            oci_archive="$work/kairos-nix-poc-arm64.oci.tar"
+            docker --context "$context" run --rm \
+              -v kairos-nix-store:/nix \
+              -v "$PWD:/workspace:ro" \
+              -v "$work:/work" \
+              -w /workspace \
+              "$nix_image" \
+              sh -c 'nix --extra-experimental-features "nix-command flakes" build path:/workspace#ociArchiveArm64 --out-link /tmp/result && cp -L /tmp/result /work/kairos-nix-poc-arm64.oci.tar'
+
+            docker_archive="$work/kairos-nix-poc-arm64.tar"
+            mkdir "$work/skopeo"
+            skopeo --tmpdir "$work/skopeo" --insecure-policy copy \
+              "oci-archive:$oci_archive" \
+              "docker-archive:$docker_archive:kairos-nix-poc-arm64:${arm64Vm.tag}"
+
+            volumes=(
+              -v "$docker_archive:/images/kairos-nix-poc-arm64.tar:ro"
+              -v "$work/output:/output"
+            )
+            arguments=(
+              --set container_image=ocifile:///images/kairos-nix-poc-arm64.tar
+              --set state_dir=/output
+              --set disable_http_server=true
+              --set disable_netboot=true
+              --set disk.efi=true
+            )
+
+            if [[ $# == 2 ]]; then
+              cp "$2" "$work/cloud-config.yaml"
+              volumes+=(-v "$work/cloud-config.yaml:/config.yaml:ro")
+              arguments+=(--cloud-config /config.yaml)
+            fi
+
+            auroraboot=quay.io/kairos/auroraboot@sha256:784509bb3d01c2995cf427ca2ea7ab8292860477fecf462388b86745ed02da5c
+            docker --context "$context" run --rm --privileged \
+              "''${volumes[@]}" \
+              "$auroraboot" \
+              "''${arguments[@]}"
+
+            cp "$work/output/"*.raw "$output/"
+          '';
+        };
 
       mkTestVm =
         {
@@ -227,6 +324,13 @@
           test-vm = mkTestApp "amd64";
           test-vm-arm64 = mkTestApp "arm64";
         }
+        // nixpkgs.lib.optionalAttrs (hostOs == "darwin") {
+          build-vm-macos = {
+            type = "app";
+            program = "${mkBuildVmMacos hostPkgs}/bin/build-kairos-vm-macos";
+            meta.description = "Build an ARM64 Kairos VM disk on macOS using a dedicated Colima VM";
+          };
+        }
       );
     in
     {
@@ -240,6 +344,13 @@
         ociArchiveArm64 = arm64OciArchive;
         dockerArchiveArm64 = arm64Vm.dockerArchive;
         vmRootArm64 = arm64Vm.root;
+      };
+
+      packages.${armSystem} = {
+        default = nativeArm64OciArchive;
+        ociArchiveArm64 = nativeArm64OciArchive;
+        dockerArchiveArm64 = nativeArm64Vm.dockerArchive;
+        vmRootArm64 = nativeArm64Vm.root;
       };
 
       apps = testApps // {
@@ -256,6 +367,8 @@
         image-contract = verifyImage;
         image-contract-arm64 = verifyArm64Image;
       };
+
+      checks.${armSystem}.image-contract-arm64 = verifyNativeArm64Image;
 
       formatter = nixpkgs.lib.genAttrs supportedSystems (
         hostSystem: (import nixpkgs { system = hostSystem; }).nixfmt-tree
