@@ -27,10 +27,12 @@ At boot the service writes `/run/kairos-nix/status.json`.
 
 ## Build and verify
 
-The current POC targets x86-64/amd64.
+The POC produces both x86-64/amd64 and ARM64 images. The amd64 image remains
+the default:
 
 ```console
 nix build
+nix build .#ociArchiveArm64
 nix flake check
 ```
 
@@ -67,9 +69,10 @@ placeholder must be replaced.
 
 ## Test the VM on macOS
 
-Generate the raw disk on a Linux host as above, then copy the `.raw` file from
-`./output` to the Mac. Raw disk generation cannot run directly on macOS because
-AuroraBoot depends on Linux loop devices and filesystem mounts.
+Generate the raw disk from either architecture's OCI archive on a Linux host as
+above, then copy the `.raw` file from `./output` to the Mac. Raw disk generation
+cannot run directly on macOS because AuroraBoot depends on Linux loop devices
+and filesystem mounts.
 
 With [Nix installed](https://nixos.org/download/), boot the disk using the
 flake-provided QEMU app:
@@ -78,11 +81,20 @@ flake-provided QEMU app:
 nix run .#test-vm -- /path/to/kairos.raw
 ```
 
+On Apple Silicon, use the ARM64 image and native launcher for hardware
+acceleration:
+
+```console
+# On Linux, build .#ociArchiveArm64 and run .#build-vm against the result.
+# Copy the resulting raw disk to the Mac, then:
+nix run .#test-vm-arm64 -- /path/to/kairos-arm64.raw
+```
+
 The app supplies QEMU and UEFI firmware, opens the VM display, forwards host
 port 2222 to the guest's SSH port, and uses QEMU snapshot mode so the source
 disk is not modified. Set `KAIROS_SSH_PORT` to change the host port. Intel Macs
-use Apple's HVF acceleration; Apple Silicon Macs emulate this POC's x86-64
-image and will boot more slowly.
+use Apple's HVF acceleration for amd64; Apple Silicon Macs use HVF for ARM64
+and can still emulate amd64 more slowly.
 
 After replacing the key in `cloud-config.yaml` before disk creation, connect
 with:
@@ -106,12 +118,14 @@ nix shell nixpkgs#skopeo -c \
   skopeo copy oci-archive:./result docker://registry.example.com/kairos/nix-poc:0.1.0
 ```
 
-Then use that image reference as the install/upgrade source in Kairos. Increment
-`tag` in `vms/poc.nix` for each immutable OS revision.
+Then use that image reference as the install/upgrade source in Kairos. Use
+architecture-specific tags when publishing the separate archives, or combine
+them into a multi-platform manifest. Increment `tag` in `vms/poc.nix` for each
+immutable OS revision.
 
 ## Extending the POC
 
-`lib.mkKairosImage` accepts a root derivation and image metadata. Add another
-file under `vms/`, construct its root from Nix packages and configuration, and
-call the same function. Do not overwrite Kairos-owned paths such as
-`/etc/kairos-release`, `/boot/vmlinuz`, or `/boot/initrd`.
+`lib.mkKairosImage` accepts an architecture, root derivation, and image
+metadata. Add another file under `vms/`, construct its root from Nix packages
+and configuration, and call the same function. Do not overwrite Kairos-owned
+paths such as `/etc/kairos-release`, `/boot/vmlinuz`, or `/boot/initrd`.

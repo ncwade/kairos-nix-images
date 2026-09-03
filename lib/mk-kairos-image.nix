@@ -3,6 +3,7 @@
 {
   name,
   tag,
+  architecture,
   base,
   root,
 }:
@@ -17,12 +18,12 @@ let
       finalImageTag
       ;
     os = "linux";
-    arch = "amd64";
+    arch = architecture;
   };
 in
 pkgs.dockerTools.buildLayeredImage {
   inherit name tag;
   fromImage = baseImage;
   contents = [ root ];
-  architecture = "amd64";
+  inherit architecture;
 }

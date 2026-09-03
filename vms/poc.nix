@@ -1,8 +1,32 @@
-{ pkgs, mkKairosImage }:
+{
+  pkgs,
+  mkKairosImage,
+  architecture,
+}:
 
 let
-  name = "kairos-nix-poc";
+  name = "kairos-nix-poc-${architecture}";
   tag = "0.1.0";
+
+  base =
+    if architecture == "amd64" then
+      {
+        imageName = "quay.io/kairos/hadron";
+        imageDigest = "sha256:ca75eb00118696ead63c689f92138da23c7231eb63c2903d7a7e7375ff5f7e83";
+        sha256 = "sha256-qgR+TYyUox8ZBKqjLZ/ysHZNO2kxwHapkaQX4kttp2c=";
+        finalImageName = "quay.io/kairos/hadron";
+        finalImageTag = "v0.5.1-core-amd64-generic-v4.2.0";
+      }
+    else if architecture == "arm64" then
+      {
+        imageName = "quay.io/kairos/hadron";
+        imageDigest = "sha256:d3a6526505743d780e6d2bd35ac680a79a2813e9a2b7bc561cff088d9dcbbba7";
+        sha256 = "sha256-F19NSTTlWDmm7ihvrgkuNmJZ186FVRPYaad4W19E0VQ=";
+        finalImageName = "quay.io/kairos/hadron";
+        finalImageTag = "v0.5.1-core-arm64-generic-v4.2.0";
+      }
+    else
+      throw "unsupported Kairos architecture: ${architecture}";
 
   report = pkgs.writeShellApplication {
     name = "kairos-nix-report";
@@ -51,20 +75,20 @@ let
   '';
 
   dockerArchive = mkKairosImage {
-    inherit name tag root;
-    base = {
-      imageName = "quay.io/kairos/hadron";
-      imageDigest = "sha256:ca75eb00118696ead63c689f92138da23c7231eb63c2903d7a7e7375ff5f7e83";
-      sha256 = "sha256-qgR+TYyUox8ZBKqjLZ/ysHZNO2kxwHapkaQX4kttp2c=";
-      finalImageName = "quay.io/kairos/hadron";
-      finalImageTag = "v0.5.1-core-amd64-generic-v4.2.0";
-    };
+    inherit
+      name
+      tag
+      architecture
+      root
+      base
+      ;
   };
 in
 {
   inherit
     name
     tag
+    architecture
     root
     dockerArchive
     ;

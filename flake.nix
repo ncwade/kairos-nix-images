@@ -14,10 +14,19 @@
       ];
       pkgs = import nixpkgs { inherit system; };
       mkKairosImage = import ./lib/mk-kairos-image.nix { inherit pkgs; };
-      vm = import ./vms/poc.nix { inherit pkgs mkKairosImage; };
+      mkVm =
+        imagePkgs: architecture:
+        import ./vms/poc.nix {
+          pkgs = imagePkgs;
+          mkKairosImage = import ./lib/mk-kairos-image.nix { pkgs = imagePkgs; };
+          inherit architecture;
+        };
+      vm = mkVm pkgs "amd64";
+      arm64Vm = mkVm pkgs.pkgsCross.aarch64-multiplatform "arm64";
 
-      ociArchive =
-        pkgs.runCommand "${vm.name}-${vm.tag}.oci.tar"
+      mkOciArchive =
+        image:
+        pkgs.runCommand "${image.name}-${image.tag}.oci.tar"
           {
             nativeBuildInputs = [ pkgs.skopeo ];
           }
@@ -25,24 +34,27 @@
             export TMPDIR=$PWD/tmp
             mkdir "$TMPDIR"
             skopeo --tmpdir "$TMPDIR" --insecure-policy copy \
-              docker-archive:${vm.dockerArchive} \
-              oci-archive:$out:${vm.tag}
+              docker-archive:${image.dockerArchive} \
+              oci-archive:$out:${image.tag}
           '';
+      ociArchive = mkOciArchive vm;
+      arm64OciArchive = mkOciArchive arm64Vm;
 
-      verifyImage =
-        pkgs.runCommand "verify-${vm.name}-${vm.tag}"
+      mkVerifyImage =
+        image: archive:
+        pkgs.runCommand "verify-${image.name}-${image.tag}"
           {
             nativeBuildInputs = [ pkgs.jq ];
           }
           ''
             mkdir archive
-            tar -xf ${ociArchive} -C archive
+            tar -xf ${archive} -C archive
 
             manifest_digest=$(jq -r '.manifests[0].digest' archive/index.json)
             manifest="archive/blobs/sha256/''${manifest_digest#sha256:}"
             config_digest=$(jq -r '.config.digest' "$manifest")
             config="archive/blobs/sha256/''${config_digest#sha256:}"
-            jq -e '.architecture == "amd64" and .os == "linux"' "$config" >/dev/null
+            jq -e '.architecture == "${image.architecture}" and .os == "linux"' "$config" >/dev/null
 
             : > files
             : > service
@@ -50,7 +62,7 @@
               layer="archive/blobs/sha256/''${layer_digest#sha256:}"
               tar -tf "$layer" 2>/dev/null | sed -e 's#^\./##' -e 's#^/##' >> files
               service_member=$(tar -tf "$layer" 2>/dev/null \
-                | grep -E '^(/|\./)?nix/store/[^/]+-kairos-nix-poc-root/etc/systemd/system/kairos-nix-poc\.service$' \
+                | grep -E '^(/|\./)?nix/store/[^/]+-kairos-nix-poc-[^/]+-root/etc/systemd/system/kairos-nix-poc\.service$' \
                 || true)
               if [[ -n "$service_member" ]]; then
                 tar -xOf "$layer" "$service_member" 2>/dev/null > service
@@ -69,6 +81,8 @@
 
             touch $out
           '';
+      verifyImage = mkVerifyImage vm ociArchive;
+      verifyArm64Image = mkVerifyImage arm64Vm arm64OciArchive;
 
       buildVm = pkgs.writeShellApplication {
         name = "build-kairos-vm";
@@ -132,7 +146,14 @@
         {
           hostPkgs,
           firmware,
+          guestArchitecture,
         }:
+        let
+          qemuBinary = if guestArchitecture == "arm64" then "qemu-system-aarch64" else "qemu-system-x86_64";
+          machine = if guestArchitecture == "arm64" then "virt" else "q35";
+          darwinHostArchitecture = if guestArchitecture == "arm64" then "arm64" else "x86_64";
+          linuxHostArchitecture = if guestArchitecture == "arm64" then "aarch64" else "x86_64";
+        in
         hostPkgs.writeShellApplication {
           name = "test-kairos-vm";
           runtimeInputs = [ hostPkgs.qemu ];
@@ -149,10 +170,10 @@
             disk=$(realpath "$1")
 
             case "$(uname -s):$(uname -m)" in
-              Darwin:x86_64)
+              Darwin:${darwinHostArchitecture})
                 acceleration=(-accel hvf -cpu host)
                 ;;
-              Linux:x86_64)
+              Linux:${linuxHostArchitecture})
                 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
                   acceleration=(-accel kvm -cpu host)
                 else
@@ -160,7 +181,7 @@
                 fi
                 ;;
               *)
-                echo "Using x86 emulation; booting can be slow on Apple Silicon." >&2
+                echo "Using CPU emulation because the ${guestArchitecture} guest does not match this host." >&2
                 acceleration=(-accel "tcg,thread=multi" -cpu max)
                 ;;
             esac
@@ -168,9 +189,10 @@
             nvram_dir=$(mktemp -d)
             trap 'rm -rf "$nvram_dir"' EXIT
             cp ${firmware.variables} "$nvram_dir/OVMF_VARS.fd"
+            chmod u+w "$nvram_dir/OVMF_VARS.fd"
 
-            qemu-system-x86_64 \
-              -machine q35 \
+            ${qemuBinary} \
+              -machine ${machine} \
               "''${acceleration[@]}" \
               -m 4096 \
               -smp 4 \
@@ -185,19 +207,25 @@
         hostSystem:
         let
           hostPkgs = import nixpkgs { system = hostSystem; };
-          firmwarePkgs =
-            if hostSystem == "aarch64-darwin" then import nixpkgs { system = "x86_64-darwin"; } else hostPkgs;
-          testVm = mkTestVm {
-            inherit hostPkgs;
-            firmware = firmwarePkgs.OVMF;
-          };
+          hostOs = if nixpkgs.lib.hasSuffix "-darwin" hostSystem then "darwin" else "linux";
+          mkTestApp =
+            guestArchitecture:
+            let
+              guestNixCpu = if guestArchitecture == "arm64" then "aarch64" else "x86_64";
+              testVm = mkTestVm {
+                inherit hostPkgs guestArchitecture;
+                firmware = (import nixpkgs { system = "${guestNixCpu}-${hostOs}"; }).OVMF;
+              };
+            in
+            {
+              type = "app";
+              program = "${testVm}/bin/test-kairos-vm";
+              meta.description = "Boot a ${guestArchitecture} Kairos raw disk in an ephemeral QEMU VM";
+            };
         in
         {
-          test-vm = {
-            type = "app";
-            program = "${testVm}/bin/test-kairos-vm";
-            meta.description = "Boot a Kairos raw disk in an ephemeral QEMU VM";
-          };
+          test-vm = mkTestApp "amd64";
+          test-vm-arm64 = mkTestApp "arm64";
         }
       );
     in
@@ -209,6 +237,9 @@
         ociArchive = ociArchive;
         dockerArchive = vm.dockerArchive;
         vmRoot = vm.root;
+        ociArchiveArm64 = arm64OciArchive;
+        dockerArchiveArm64 = arm64Vm.dockerArchive;
+        vmRootArm64 = arm64Vm.root;
       };
 
       apps = testApps // {
@@ -221,7 +252,10 @@
         };
       };
 
-      checks.${system}.image-contract = verifyImage;
+      checks.${system} = {
+        image-contract = verifyImage;
+        image-contract-arm64 = verifyArm64Image;
+      };
 
       formatter = nixpkgs.lib.genAttrs supportedSystems (
         hostSystem: (import nixpkgs { system = hostSystem; }).nixfmt-tree
