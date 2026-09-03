@@ -129,7 +129,10 @@
       };
 
       mkTestVm =
-        hostPkgs:
+        {
+          hostPkgs,
+          firmware,
+        }:
         hostPkgs.writeShellApplication {
           name = "test-kairos-vm";
           runtimeInputs = [ hostPkgs.qemu ];
@@ -162,17 +165,17 @@
                 ;;
             esac
 
-            firmware=$(mktemp -d)
-            trap 'rm -rf "$firmware"' EXIT
-            cp ${hostPkgs.OVMF.fd}/FV/OVMF_VARS.fd "$firmware/OVMF_VARS.fd"
+            nvram_dir=$(mktemp -d)
+            trap 'rm -rf "$nvram_dir"' EXIT
+            cp ${firmware.variables} "$nvram_dir/OVMF_VARS.fd"
 
             qemu-system-x86_64 \
               -machine q35 \
               "''${acceleration[@]}" \
               -m 4096 \
               -smp 4 \
-              -drive if=pflash,format=raw,readonly=on,file=${hostPkgs.OVMF.fd}/FV/OVMF_CODE.fd \
-              -drive if=pflash,format=raw,file="$firmware/OVMF_VARS.fd" \
+              -drive if=pflash,format=raw,readonly=on,file=${firmware.firmware} \
+              -drive if=pflash,format=raw,file="$nvram_dir/OVMF_VARS.fd" \
               -drive if=virtio,format=raw,snapshot=on,file="$disk" \
               -nic "user,model=virtio-net-pci,hostfwd=tcp::''${KAIROS_SSH_PORT:-2222}-:22"
           '';
@@ -181,7 +184,13 @@
       testApps = nixpkgs.lib.genAttrs supportedSystems (
         hostSystem:
         let
-          testVm = mkTestVm (import nixpkgs { system = hostSystem; });
+          hostPkgs = import nixpkgs { system = hostSystem; };
+          firmwarePkgs =
+            if hostSystem == "aarch64-darwin" then import nixpkgs { system = "x86_64-darwin"; } else hostPkgs;
+          testVm = mkTestVm {
+            inherit hostPkgs;
+            firmware = firmwarePkgs.OVMF;
+          };
         in
         {
           test-vm = {
